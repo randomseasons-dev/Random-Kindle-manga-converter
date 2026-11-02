@@ -47,6 +47,10 @@ The app and installers are written to `src-tauri/target/release/`.
 
 Page processing follows [Kindle Comic Converter](https://github.com/ciromattia/kcc). The AZW3 extraction is based on KindleUnpack's `mobi_split`.
 
+## License
+
+GNU General Public License v3.0 — see [LICENSE](LICENSE).
+
 ## Changelog
 
 - **1.0** — first release.
