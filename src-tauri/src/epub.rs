@@ -1,13 +1,22 @@
 // Fixed-layout comic EPUB in the shape KindleGen expects (same metadata KCC writes).
 
-use crate::imaging::{Page, DH, DW};
+use crate::devices::Device;
+use crate::imaging::Page;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::Path;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipWriter};
 
-pub fn build(path: &Path, title: &str, uuid: &str, pages: &[Page], rtl: bool) -> Result<(), String> {
+pub fn build(
+    path: &Path,
+    title: &str,
+    uuid: &str,
+    pages: &[Page],
+    cover: &[u8],
+    rtl: bool,
+    dev: &Device,
+) -> Result<(), String> {
     let file = File::create(path).map_err(|e| e.to_string())?;
     let mut z = ZipWriter::new(BufWriter::new(file));
     let opt = SimpleFileOptions::default()
@@ -20,11 +29,30 @@ pub fn build(path: &Path, title: &str, uuid: &str, pages: &[Page], rtl: bool) ->
 
     put(&mut z, "mimetype", b"application/epub+zip")?;
     put(&mut z, "META-INF/container.xml", CONTAINER.as_bytes())?;
-    put(&mut z, "OEBPS/Text/style.css", CSS.as_bytes())?;
+    let css = if dev.scribe() { format!("{CSS}img {{\ndisplay: block;\n}}\n") } else { CSS.to_string() };
+    put(&mut z, "OEBPS/Text/style.css", css.as_bytes())?;
+    put(&mut z, "OEBPS/Images/cover.jpg", cover)?;
 
     let title = esc(title);
+    let mut manifest = String::new();
+    let mut spine = String::new();
     for (i, p) in pages.iter().enumerate() {
         let n = i + 1;
+        // a Scribe page taller than 1920 px is two pictures, the second placed below the first
+        let mut imgs = String::new();
+        for (k, (file, w, h)) in p.parts.iter().enumerate() {
+            let name = if k == 0 { format!("p{n:05}.jpg") } else { format!("p{n:05}b.jpg") };
+            let style = if k == 0 { String::new() } else { "style=\"top: 1920px\" ".to_string() };
+            imgs.push_str(&format!("<img {style}width=\"{w}\" height=\"{h}\" src=\"../Images/{name}\"/>\n"));
+            let data = std::fs::read(file).map_err(|e| e.to_string())?;
+            put(&mut z, &format!("OEBPS/Images/{name}"), &data)?;
+            let id = if k == 0 { format!("img_{n}") } else { format!("img_{n}b") };
+            manifest.push_str(&format!("<item id=\"{id}\" href=\"Images/{name}\" media-type=\"image/jpeg\"/>\n"));
+        }
+        manifest.push_str(&format!(
+            "<item id=\"page_{n}\" href=\"Text/p{n:05}.xhtml\" media-type=\"application/xhtml+xml\"/>\n"
+        ));
+        spine.push_str(&format!("<itemref idref=\"page_{n}\" linear=\"yes\"/>\n"));
         let html = format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE html>
@@ -35,32 +63,19 @@ pub fn build(path: &Path, title: &str, uuid: &str, pages: &[Page], rtl: bool) ->
 <meta name="viewport" content="width={w}, height={h}"/>
 </head>
 <body>
-<div style="text-align:center;top:0.0%;">
-<img width="{w}" height="{h}" src="../Images/p{n:05}.jpg"/>
-</div>
+<div style="text-align:center;">
+<div style="display:none;">.</div>
+{imgs}</div>
 </body>
 </html>
 "#,
-            w = p.w,
-            h = p.h
+            w = p.width(),
+            h = p.height()
         );
         put(&mut z, &format!("OEBPS/Text/p{n:05}.xhtml"), html.as_bytes())?;
-        let img = std::fs::read(&p.path).map_err(|e| e.to_string())?;
-        put(&mut z, &format!("OEBPS/Images/p{n:05}.jpg"), &img)?;
-        if i == 0 {
-            put(&mut z, "OEBPS/Images/cover.jpg", &img)?;
-        }
     }
 
-    let mut manifest = String::new();
-    let mut spine = String::new();
-    for i in 1..=pages.len() {
-        manifest.push_str(&format!(
-            "<item id=\"page_{i}\" href=\"Text/p{i:05}.xhtml\" media-type=\"application/xhtml+xml\"/>\n\
-             <item id=\"img_{i}\" href=\"Images/p{i:05}.jpg\" media-type=\"image/jpeg\"/>\n"
-        ));
-        spine.push_str(&format!("<itemref idref=\"page_{i}\" linear=\"yes\"/>\n"));
-    }
+    let (dw, dh) = dev.size();
     let (mode, dir) = if rtl { ("horizontal-rl", "rtl") } else { ("horizontal-lr", "ltr") };
     let opf = format!(
         r##"<?xml version="1.0" encoding="UTF-8"?>
@@ -74,7 +89,7 @@ pub fn build(path: &Path, title: &str, uuid: &str, pages: &[Page], rtl: bool) ->
 <meta property="dcterms:modified">{now}</meta>
 <meta name="cover" content="cover"/>
 <meta name="fixed-layout" content="true"/>
-<meta name="original-resolution" content="{DW}x{DH}"/>
+<meta name="original-resolution" content="{dw}x{dh}"/>
 <meta name="book-type" content="comic"/>
 <meta name="primary-writing-mode" content="{mode}"/>
 <meta name="zero-gutter" content="true"/>

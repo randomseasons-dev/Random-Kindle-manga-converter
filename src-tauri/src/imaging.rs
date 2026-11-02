@@ -1,77 +1,189 @@
-// Page processing, following KCC's pipeline for a grayscale Kindle:
-// crop -> gamma -> autocontrast -> spread split/rotate -> resize -> JPEG.
+// Page processing, following KCC's pipeline:
+// crop -> gamma -> autocontrast -> spread split/rotate -> resize to the device -> JPEG.
+// Pages are grayscale, except colour pages on a colour Kindle.
 
 use crate::convert::Options;
+use crate::devices::Device;
 use image::imageops::{self, FilterType};
-use image::{GrayImage, ImageReader};
+use image::{DynamicImage, GrayImage, ImageReader};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
 
-// Kindle 11 screen
-pub const DW: u32 = 1072;
-pub const DH: u32 = 1448;
-const JPEG_QUALITY: u8 = 85;
-
 pub struct Page {
-    pub path: PathBuf,
-    pub w: u32,
-    pub h: u32,
+    /// pictures stacked top to bottom (two on a Scribe when the page is taller than 1920 px)
+    pub parts: Vec<(PathBuf, u32, u32)>,
     pub size: u64,
 }
 
-pub fn process(src: &Path, o: &Options, idx: usize, dir: &Path) -> Result<Vec<Page>, String> {
+impl Page {
+    pub fn width(&self) -> u32 {
+        self.parts[0].1
+    }
+
+    pub fn height(&self) -> u32 {
+        self.parts.iter().map(|p| p.2).sum()
+    }
+}
+
+pub fn process(src: &Path, o: &Options, dev: &Device, idx: usize, dir: &Path) -> Result<Vec<Page>, String> {
     let img = ImageReader::open(src)
         .map_err(|e| e.to_string())?
         .with_guessed_format()
         .map_err(|e| e.to_string())?
         .decode()
         .map_err(|e| e.to_string())?;
-    let mut g = img.to_luma8();
+    let color = dev.color && is_color(&img);
+    let mut im = if color {
+        DynamicImage::ImageRgb8(img.to_rgb8())
+    } else {
+        DynamicImage::ImageLuma8(img.to_luma8())
+    };
     drop(img);
 
     if o.cropping > 0 {
-        g = crop(g, o);
+        let rect = match &im {
+            DynamicImage::ImageLuma8(g) => crop_rect(g, o),
+            other => crop_rect(&other.to_luma8(), o),
+        };
+        if let Some((x, y, w, h)) = rect {
+            im = im.crop_imm(x, y, w, h);
+        }
     }
-    apply_gamma(&mut g, o.gamma);
-    autocontrast(&mut g);
+    apply_gamma(&mut im, o.gamma);
+    if let DynamicImage::ImageLuma8(g) = &mut im {
+        autocontrast(g); // colour pages are left as they are, like KCC
+    }
 
+    let q = dev.jpeg_quality();
     let mut pages = Vec::new();
-    for (tag, part) in split(g, o) {
-        let out = resize(part, o);
-        let path = dir.join(format!("{:05}_{}.jpg", idx, tag));
-        let file = std::fs::File::create(&path).map_err(|e| e.to_string())?;
-        let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(BufWriter::new(file), JPEG_QUALITY);
-        enc.encode_image(&out).map_err(|e| e.to_string())?;
-        drop(enc);
-        let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-        pages.push(Page { path, w: out.width(), h: out.height(), size });
+    for (tag, part) in split(im, o, dev) {
+        let out = resize(part, o, dev);
+        let (w, h) = (out.width(), out.height());
+        let mut page = Page { parts: Vec::new(), size: 0 };
+        if dev.scribe() && h > 1920 {
+            let above = out.crop_imm(0, 0, w, 1920);
+            let below = out.crop_imm(0, 1920, w, h - 1920);
+            for (name, pic) in [("above", above), ("below", below)] {
+                let path = dir.join(format!("{idx:05}_{tag}_{name}.jpg"));
+                page.size += save_jpeg(&pic, &path, q)?;
+                page.parts.push((path, pic.width(), pic.height()));
+            }
+        } else {
+            let path = dir.join(format!("{idx:05}_{tag}.jpg"));
+            page.size += save_jpeg(&out, &path, q)?;
+            page.parts.push((path, w, h));
+        }
+        pages.push(page);
     }
     Ok(pages)
+}
+
+fn save_jpeg(im: &DynamicImage, path: &Path, quality: u8) -> Result<u64, String> {
+    let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
+    let mut enc = image::codecs::jpeg::JpegEncoder::new_with_quality(BufWriter::new(file), quality);
+    enc.encode_image(im).map_err(|e| e.to_string())?;
+    drop(enc);
+    Ok(std::fs::metadata(path).map(|m| m.len()).unwrap_or(0))
+}
+
+/// Cover picture: the page itself, or for a Scribe the whole page shrunk to fit 1920 x 1920.
+pub fn cover_jpeg(p: &Page, dev: &Device) -> Result<Vec<u8>, String> {
+    if p.parts.len() == 1 && !(dev.scribe() && (p.width() > 1920 || p.height() > 1920)) {
+        return std::fs::read(&p.parts[0].0).map_err(|e| e.to_string());
+    }
+    let mut parts = Vec::new();
+    for (path, _, _) in &p.parts {
+        parts.push(image::open(path).map_err(|e| e.to_string())?);
+    }
+    let mut whole = DynamicImage::new(p.width(), p.height(), parts[0].color());
+    let mut y = 0i64;
+    for part in &parts {
+        imageops::overlay(&mut whole, part, 0, y);
+        y += part.height() as i64;
+    }
+    let whole = whole.resize(1920, 1920, FilterType::Lanczos3);
+    let mut buf = Vec::new();
+    image::codecs::jpeg::JpegEncoder::new_with_quality(&mut buf, dev.jpeg_quality())
+        .encode_image(&whole)
+        .map_err(|e| e.to_string())?;
+    Ok(buf)
+}
+
+// ---------- colour detection (KCC's colour-mode check) ----------
+
+fn is_color(img: &DynamicImage) -> bool {
+    if !img.color().has_color() {
+        return false;
+    }
+    let rgb = img.to_rgb8();
+    let (mut cb, mut cr) = ([0u64; 256], [0u64; 256]);
+    for p in rgb.pixels() {
+        let (r, g, b) = (p[0] as f32, p[1] as f32, p[2] as f32);
+        let vb = 128.0 - 0.168736 * r - 0.331264 * g + 0.5 * b;
+        let vr = 128.0 + 0.5 * r - 0.418688 * g - 0.081312 * b;
+        cb[vb.round().clamp(0.0, 255.0) as usize] += 1;
+        cr[vr.round().clamp(0.0, 255.0) as usize] += 1;
+    }
+    for (cutoff, diff) in [(0.0f32, 22usize), (0.2, 10), (3.0, 4)] {
+        let (b0, b1) = hist_ends(&cb, cutoff);
+        let (r0, r1) = hist_ends(&cr, cutoff);
+        if b0 > 128 || r0 > 128 || b1 < 128 || r1 < 128 {
+            return true;
+        }
+        if b0 <= 128 - diff || r0 <= 128 - diff || b1 >= 128 + diff || r1 >= 128 + diff {
+            return true;
+        }
+    }
+    false
+}
+
+/// First and last used histogram bins after trimming `cutoff` % of pixels from each end.
+fn hist_ends(h: &[u64; 256], cutoff: f32) -> (usize, usize) {
+    let n: u64 = h.iter().sum();
+    let cut = (n as f64 * cutoff as f64 / 100.0) as u64;
+    let (mut acc, mut lo) = (0u64, 0usize);
+    for (v, &c) in h.iter().enumerate() {
+        acc += c;
+        if acc > cut {
+            lo = v;
+            break;
+        }
+    }
+    let (mut acc, mut hi) = (0u64, 255usize);
+    for v in (0..256).rev() {
+        acc += h[v];
+        if acc > cut {
+            hi = v;
+            break;
+        }
+    }
+    (lo, hi)
 }
 
 // ---------- spread splitter ----------
 
 // Tags sort in reading order: a = rotated (first), b/c = halves, d = rotated (last), x = normal.
-fn split(g: GrayImage, o: &Options) -> Vec<(char, GrayImage)> {
-    let (w, h) = g.dimensions();
+fn split(im: DynamicImage, o: &Options, dev: &Device) -> Vec<(char, DynamicImage)> {
+    let (dw, dh) = dev.size();
+    let (w, h) = (im.width(), im.height());
     let landscape = w > h;
     let ratio = w as f32 / h as f32;
     let rot_tag = if o.rotate_first { 'a' } else { 'd' };
 
-    if landscape && w <= DH && h <= DW && o.splitter == 1 {
-        return vec![(rot_tag, imageops::rotate270(&g))];
+    if landscape && w <= dh && h <= dw && o.splitter == 1 {
+        return vec![(rot_tag, im.rotate270())];
     }
     if landscape && ratio > 1.16 {
         let do_split = o.splitter != 1 && ratio < 1.8;
         let do_rotate = o.splitter > 0 || ratio >= 1.8;
         let mut out = Vec::new();
         if do_rotate && o.rotate_first {
-            out.push(('a', imageops::rotate270(&g)));
+            out.push(('a', im.rotate270()));
         }
         if do_split {
             let half = w / 2;
-            let left = imageops::crop_imm(&g, 0, 0, half, h).to_image();
-            let right = imageops::crop_imm(&g, half, 0, w - half, h).to_image();
+            let left = im.crop_imm(0, 0, half, h);
+            let right = im.crop_imm(half, 0, w - half, h);
             if o.right_to_left {
                 out.push(('b', right));
                 out.push(('c', left));
@@ -81,53 +193,58 @@ fn split(g: GrayImage, o: &Options) -> Vec<(char, GrayImage)> {
             }
         }
         if do_rotate && !o.rotate_first {
-            out.push(('d', imageops::rotate270(&g)));
+            out.push(('d', im.rotate270()));
         }
         return out;
     }
-    vec![('x', g)]
+    vec![('x', im)]
 }
 
 // ---------- resize ----------
 
-fn resize(g: GrayImage, o: &Options) -> GrayImage {
-    let (w, h) = g.dimensions();
-    let small = w <= DW && h <= DH;
+fn resize(im: DynamicImage, o: &Options, dev: &Device) -> DynamicImage {
+    let (dw, dh) = dev.size();
+    let (w, h) = (im.width(), im.height());
+    let small = w <= dw && h <= dh;
     let filter = if small { FilterType::CatmullRom } else { FilterType::Lanczos3 };
 
     if o.scale == "stretch" {
-        return imageops::resize(&g, DW, DH, filter);
+        return im.resize_exact(dw, dh, filter);
     }
     if small && o.scale != "upscale" {
-        return g;
+        return im;
     }
     let ar_img = w as f32 / h as f32;
-    let ar_dev = DW as f32 / DH as f32;
+    let ar_dev = dw as f32 / dh as f32;
     if (ar_img - ar_dev).abs() < 0.015 {
         // nearly the screen's shape: fill the screen, trim the overflow
-        let s = f32::max(DW as f32 / w as f32, DH as f32 / h as f32);
-        let nw = ((w as f32 * s).ceil() as u32).max(DW);
-        let nh = ((h as f32 * s).ceil() as u32).max(DH);
-        let r = imageops::resize(&g, nw, nh, filter);
-        imageops::crop_imm(&r, (nw - DW) / 2, (nh - DH) / 2, DW, DH).to_image()
+        let s = f32::max(dw as f32 / w as f32, dh as f32 / h as f32);
+        let nw = ((w as f32 * s).ceil() as u32).max(dw);
+        let nh = ((h as f32 * s).ceil() as u32).max(dh);
+        im.resize_exact(nw, nh, filter).crop_imm((nw - dw) / 2, (nh - dh) / 2, dw, dh)
     } else {
-        let s = f32::min(DW as f32 / w as f32, DH as f32 / h as f32);
-        let nw = ((w as f32 * s).round() as u32).clamp(1, DW);
-        let nh = ((h as f32 * s).round() as u32).clamp(1, DH);
-        imageops::resize(&g, nw, nh, filter)
+        let s = f32::min(dw as f32 / w as f32, dh as f32 / h as f32);
+        let nw = ((w as f32 * s).round() as u32).clamp(1, dw);
+        let nh = ((h as f32 * s).round() as u32).clamp(1, dh);
+        im.resize_exact(nw, nh, filter)
     }
 }
 
 // ---------- tone ----------
 
-fn apply_gamma(g: &mut GrayImage, gamma: f32) {
+fn apply_gamma(im: &mut DynamicImage, gamma: f32) {
     if gamma < 0.1 || (gamma - 1.0).abs() < 1e-3 {
         return; // Auto = profile gamma 1.0
     }
     let lut: Vec<u8> = (0..256)
         .map(|v| (255.0 * (v as f32 / 255.0).powf(gamma)) as u8)
         .collect();
-    for p in g.iter_mut() {
+    let bytes: &mut [u8] = match im {
+        DynamicImage::ImageLuma8(g) => &mut **g,
+        DynamicImage::ImageRgb8(c) => &mut **c,
+        _ => return,
+    };
+    for p in bytes.iter_mut() {
         *p = lut[*p as usize];
     }
 }
@@ -153,11 +270,10 @@ fn autocontrast(g: &mut GrayImage) {
 
 // ---------- cropping ----------
 
-fn crop(g: GrayImage, o: &Options) -> GrayImage {
+/// Crop rectangle (x, y, w, h), or None to keep the page as it is.
+fn crop_rect(g: &GrayImage, o: &Options) -> Option<(u32, u32, u32, u32)> {
     let (w, h) = g.dimensions();
-    let Some((mut l, mut t, mut r, mut b)) = content_box(&g, o.cropping_power, o.cropping == 2) else {
-        return g;
-    };
+    let (mut l, mut t, mut r, mut b) = content_box(g, o.cropping_power, o.cropping == 2)?;
     // never remove more than 10% per side
     l = l.min(w / 10);
     t = t.min(h / 10);
@@ -171,9 +287,9 @@ fn crop(g: GrayImage, o: &Options) -> GrayImage {
         b = h - ((h - b) as f32 * k) as u32;
     }
     if r <= l || b <= t || (l == 0 && t == 0 && r == w && b == h) {
-        return g;
+        return None;
     }
-    imageops::crop_imm(&g, l, t, r - l, b - t).to_image()
+    Some((l, t, r - l, b - t))
 }
 
 /// Content bounding box (x0, y0, x1, y1), x1/y1 exclusive.

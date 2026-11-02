@@ -1,4 +1,5 @@
 use crate::imaging::{self, Page};
+use crate::devices::{self, Device};
 use crate::{epub, mobi, CANCEL};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -12,6 +13,7 @@ use tauri::{AppHandle, Emitter};
 #[derive(Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Options {
+    pub device: String,
     pub format: String,      // "mobi" | "azw3"
     pub folder_mode: String, // "volumes" | "single"
     pub right_to_left: bool,
@@ -265,11 +267,18 @@ impl Drop for WorkDir {
     }
 }
 
-pub fn run(app: &AppHandle, inputs: Vec<String>, o: Options) {
+pub fn run(app: &AppHandle, inputs: Vec<String>, mut o: Options) {
     let Some(kg) = find_kindlegen(o.kindlegen.as_deref()) else {
         log(app, "error", "KindleGen was not found. Install Kindle Previewer 3, or pick kindlegen.exe with \"Browse…\".");
         return;
     };
+    let dev = devices::get(&o.device);
+    let (dw, dh) = dev.size();
+    log(app, "info", format!("Device: {} ({dw} × {dh}{})", dev.name, if dev.color { ", colour" } else { "" }));
+    if dev.kf7 && o.format == "azw3" {
+        log(app, "warn", format!("{} can't open AZW3, making MOBI instead.", dev.name));
+        o.format = "mobi".into();
+    }
 
     let mut jobs = Vec::new();
     for input in &inputs {
@@ -298,7 +307,7 @@ pub fn run(app: &AppHandle, inputs: Vec<String>, o: Options) {
             break;
         }
         log(app, "info", format!("[{}/{}] {}  ({} pictures)", i + 1, n, job.title, job.images.len()));
-        match convert_job(app, &pool, job, &o, &kg, &done, total) {
+        match convert_job(app, &pool, job, &o, dev, &kg, &done, total) {
             Ok(outs) => {
                 ok += 1;
                 for p in outs {
@@ -323,6 +332,7 @@ fn convert_job(
     pool: &rayon::ThreadPool,
     job: &Job,
     o: &Options,
+    dev: &Device,
     kg: &Path,
     done: &AtomicUsize,
     total: usize,
@@ -340,7 +350,7 @@ fn convert_job(
                 if cancelled() {
                     return (idx, Ok(Vec::new()));
                 }
-                let r = imaging::process(src, o, idx, &pages_dir);
+                let r = imaging::process(src, o, dev, idx, &pages_dir);
                 let d = done.fetch_add(1, Ordering::SeqCst) + 1;
                 let _ = app.emit("progress", Progress { done: d, total });
                 (idx, r)
@@ -394,7 +404,8 @@ fn convert_job(
         };
         let uuid = uuid::Uuid::new_v4().to_string();
         let epub_path = work.0.join(format!("book{pi}.epub"));
-        epub::build(&epub_path, &title, &uuid, part, o.right_to_left)?;
+        let cover = imaging::cover_jpeg(&part[0], dev)?;
+        epub::build(&epub_path, &title, &uuid, part, &cover, o.right_to_left, dev)?;
         log(app, "info", format!("Running KindleGen{}… (can take a few minutes)", if np > 1 { format!(" for part {}/{np}", pi + 1) } else { String::new() }));
         let mobi_path = run_kindlegen(kg, &epub_path, &work.0)?;
         let data = std::fs::read(&mobi_path).map_err(|e| e.to_string())?;

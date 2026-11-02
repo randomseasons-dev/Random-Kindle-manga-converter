@@ -7,6 +7,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import "./App.css";
 
 type Settings = {
+  device: string;
   format: string;
   folderMode: string;
   rightToLeft: string;
@@ -23,6 +24,7 @@ type Settings = {
 
 // defaults = the KCC setup this app replaces
 const DEFAULTS: Settings = {
+  device: "K11",
   format: "mobi",
   folderMode: "volumes",
   rightToLeft: "1",
@@ -126,6 +128,8 @@ const FIELDS: Field[] = [
 
 type LogLine = { level: string; text: string };
 
+type Device = { id: string; name: string; group: string; w: number; h: number; color: boolean; kf7: boolean };
+
 function loadSettings(): Settings {
   try {
     const raw = localStorage.getItem("kmc-settings");
@@ -143,7 +147,10 @@ export default function App() {
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [kgPath, setKgPath] = useState<string | null>(null);
+  const [devices, setDevices] = useState<Device[]>([]);
   const logRef = useRef<HTMLDivElement>(null);
+  const dev = devices.find((d) => d.id === settings.device);
+  const groups = [...new Set(devices.map((d) => d.group))];
 
   useEffect(() => {
     try {
@@ -160,6 +167,7 @@ export default function App() {
 
   useEffect(() => {
     checkKindlegen();
+    invoke<Device[]>("list_devices").then(setDevices);
     const un = [
       listen<LogLine>("log", (e) => setLog((l) => [...l, e.payload])),
       listen<{ done: number; total: number }>("progress", (e) => setProgress(e.payload)),
@@ -208,7 +216,8 @@ export default function App() {
       await invoke("start_convert", {
         inputs,
         opts: {
-          format: s.format,
+          device: s.device,
+          format: dev?.kf7 ? "mobi" : s.format,
           folderMode: s.folderMode,
           rightToLeft: s.rightToLeft === "1",
           splitter: Number(s.splitter),
@@ -251,22 +260,35 @@ export default function App() {
       </section>
 
       <section className="settings">
-        <label className="field">
-          <span>Device</span>
-          <select disabled value="k11">
-            <option value="k11">Kindle 11 (1072 × 1448)</option>
+        <label className="field device" title="Pages are resized for this Kindle's screen. Colour Kindles keep colour pages in colour.">
+          <span>
+            Device
+            {dev && ` · ${dev.w} × ${dev.h}${dev.color ? " · colour" : ""}${dev.kf7 ? " · MOBI only" : ""}`}
+          </span>
+          <select value={settings.device} disabled={running} onChange={(e) => set("device", e.target.value)}>
+            {groups.map((g) => (
+              <optgroup key={g} label={g}>
+                {devices
+                  .filter((d) => d.group === g)
+                  .map((d) => (
+                    <option key={d.id} value={d.id}>{d.name}</option>
+                  ))}
+              </optgroup>
+            ))}
           </select>
         </label>
         {FIELDS.map((f) => (
           <label key={f.key} className="field" title={f.tip}>
             <span>{f.label}</span>
             <select
-              value={settings[f.key]}
+              value={f.key === "format" && dev?.kf7 ? "mobi" : settings[f.key]}
               disabled={running || f.disabled?.(settings)}
               onChange={(e) => set(f.key, e.target.value)}
             >
               {f.choices.map(([v, l]) => (
-                <option key={v} value={v}>{l}</option>
+                <option key={v} value={v} disabled={f.key === "format" && v === "azw3" && dev?.kf7}>
+                  {l}
+                </option>
               ))}
             </select>
           </label>

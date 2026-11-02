@@ -1,6 +1,6 @@
 # Kindle Manga Converter
 
-A simple Windows app that turns folders of manga pictures into **MOBI** or **AZW3** books for the Kindle 11. It's a slimmed-down replacement for Kindle Comic Converter (KCC): only the options that matter are kept, and each one is a dropdown.
+A simple Windows app that turns folders of manga pictures into **MOBI** or **AZW3** books for any Kindle. It's a slimmed-down replacement for Kindle Comic Converter (KCC): only the options that matter are kept, and each one is a dropdown.
 
 ## Before you start
 
@@ -18,7 +18,8 @@ The final step uses Amazon's **KindleGen**, which comes with the free **Kindle P
 
 | Option | Choices |
 |---|---|
-| **Output format** | MOBI (KindleGen's dual file) · AZW3 (KF8 only) |
+| **Device** | Every Kindle from Kindle 1 to Scribe 3 / Scribe Colorsoft, plus screen-size profiles (same list as KCC) |
+| **Output format** | MOBI (KindleGen's dual file) · AZW3 (KF8 only, not for Kindle 1/2/DX/Keyboard/Touch) |
 | **Folder layout** | Each subfolder is a volume · Whole folder is one book |
 | **Reading direction** | Right-to-left (manga) · Left-to-right (comics) |
 | **Spread splitter** | Split · Rotate · Split and rotate (for double-page spreads) |
@@ -30,7 +31,7 @@ The final step uses Amazon's **KindleGen**, which comes with the free **Kindle P
 | **Preserve margin** | 0 – 20 % of the cut margin given back |
 | **Chunk size** | 100 – 500 MB. A bigger book is saved as Part 01, Part 02… |
 
-Every page is also converted to grayscale, contrast-stretched and resized to the Kindle 11 screen (1072 × 1448).
+Every page is also resized to the chosen Kindle's screen and contrast-stretched. Pages are grayscale, except that colour pages stay in colour on the Kindle Colorsoft and Scribe Colorsoft. On Scribe-class Kindles pages are at most 1920 px wide, and taller pages are stored as two stacked pictures (KindleGen's 1920 px limit), as KCC does.
 
 ## Build
 
@@ -53,6 +54,7 @@ GNU General Public License v3.0 — see [LICENSE](LICENSE).
 
 ## Changelog
 
+- **1.1** — all Kindle models; pages are sized for the chosen Kindle, colour kept on colour Kindles, Scribe 1920 px handling.
 - **1.0** — first release.
 
 made by RandomSeasons

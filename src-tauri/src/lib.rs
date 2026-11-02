@@ -1,4 +1,5 @@
 mod convert;
+mod devices;
 mod epub;
 mod imaging;
 mod mobi;
@@ -8,6 +9,11 @@ use tauri::{AppHandle, Emitter};
 
 pub static CANCEL: AtomicBool = AtomicBool::new(false);
 static RUNNING: AtomicBool = AtomicBool::new(false);
+
+#[tauri::command]
+fn list_devices() -> &'static [devices::Device] {
+    devices::DEVICES
+}
 
 #[tauri::command]
 fn find_kindlegen(custom: Option<String>) -> Option<String> {
@@ -44,6 +50,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
+            list_devices,
             find_kindlegen,
             start_convert,
             stop_convert,
