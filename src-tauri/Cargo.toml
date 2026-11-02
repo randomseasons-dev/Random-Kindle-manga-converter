@@ -1,0 +1,28 @@
+[package]
+name = "kindle-manga-converter"
+version = "1.0.0"
+description = "Kindle Manga Converter"
+authors = ["Dong Nguyen"]
+edition = "2021"
+
+[lib]
+name = "kindle_manga_converter_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+zip = { version = "2", default-features = false }
+rayon = "1"
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
