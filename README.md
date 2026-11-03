@@ -1,10 +1,13 @@
+# Ver 1.1 important changes:
+All Kindle Devices are added. 
+
 # Kindle Manga Converter
 
-A simple Windows app that turns folders of manga pictures into **MOBI** or **AZW3** books for any Kindle. It's a slimmed-down replacement for Kindle Comic Converter (KCC): only the options that matter are kept, and each one is a dropdown.
+A simple Windows app that turns folders of manga pictures into **MOBI** or **AZW3** books for any Kindle. It's a slimmed-down replacement for Kindle Comic Converter (KCC): only the most important settings are kept, and each one is a dropdown for easier usage.
 
 ## Before you start
 
-The final step uses Amazon's **KindleGen**, which comes with the free **Kindle Previewer 3**. Install Kindle Previewer and the app finds KindleGen automatically. You can also point the app to `kindlegen.exe` with **Browse…**.
+For the time being you need **KindleGen**, which comes with the free **Kindle Previewer 3** from Amazon website. Install Kindle Previewer and the app finds KindleGen automatically. You can also point the app to `kindlegen.exe` with **Browse…**. This is mandatory because KindleGen is the official kindle files generator from Amazon, which is the most reliable tool. In the future I'll test using in-built Kindlegen
 
 ## How to use
 
